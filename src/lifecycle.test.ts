@@ -58,9 +58,12 @@ describe("parseStartPayload", () => {
   it("parses ministry and reply links", () => {
     expect(parseStartPayload("m_12")).toEqual({ kind: "request", ministryId: 12 });
     expect(parseStartPayload("r_7")).toEqual({ kind: "reply", requestId: 7 });
+    expect(parseStartPayload("si_3")).toEqual({ kind: "link", role: "intercessor", ministryId: 3 });
+    expect(parseStartPayload("sr_3")).toEqual({ kind: "link", role: "requestor", ministryId: 3 });
+    expect(parseStartPayload("a_AbC-d_123456")).toEqual({ kind: "invite", token: "AbC-d_123456" });
   });
   it("rejects garbage", () => {
-    for (const p of [undefined, "", "m_", "x_1", "m_1a", "m_-1"]) expect(parseStartPayload(p)).toBeNull();
+    for (const p of [undefined, "", "m_", "x_1", "m_1a", "m_-1", "a_short", "s_1", "si_x"]) expect(parseStartPayload(p)).toBeNull();
   });
 });
 

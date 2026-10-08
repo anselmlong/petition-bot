@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -57,6 +58,15 @@ CREATE TABLE IF NOT EXISTS bans (
   PRIMARY KEY (ministry_id, tg_user_id)
 );
 
+-- One-time links that make the opener a ministry admin.
+CREATE TABLE IF NOT EXISTS admin_invites (
+  token       TEXT PRIMARY KEY,
+  ministry_id INTEGER NOT NULL REFERENCES ministries(id) ON DELETE CASCADE,
+  created_by  INTEGER NOT NULL,
+  created_at  INTEGER NOT NULL,
+  used_at     INTEGER
+);
+
 -- One pending multi-step DM flow per user.
 CREATE TABLE IF NOT EXISTS user_state (
   tg_user_id INTEGER PRIMARY KEY,
@@ -112,7 +122,7 @@ export interface PrayerRequest {
 }
 
 function toMinistry(r: Row): Ministry {
-  const admins = all("SELECT tg_user_id FROM ministry_admins WHERE ministry_id = ?", r.id);
+  const admins = all("SELECT tg_user_id FROM ministry_admins WHERE ministry_id = ? ORDER BY rowid", r.id);
   return {
     id: r.id,
     name: r.name,
@@ -145,7 +155,10 @@ export type UserState =
   | { step: "request_text"; ministryId: number }
   | { step: "request_anon"; ministryId: number; text: string }
   | { step: "request_expiry"; ministryId: number; text: string; anonymous: boolean }
-  | { step: "reply_text"; requestId: number };
+  | { step: "reply_text"; requestId: number }
+  | { step: "setup_name" }
+  // Waiting for the admin to add the bot to a group/channel via an add-to-chat link.
+  | { step: "setup_await_chat"; ministryId: number; role: "intercessor" | "requestor"; wizard: boolean };
 
 export function getState(userId: number): UserState | null {
   const row = get("SELECT state FROM user_state WHERE tg_user_id = ?", userId);
@@ -198,6 +211,42 @@ export function setRequestorChat(ministryId: number, chatId: number | null): voi
 
 export function addAdmin(ministryId: number, userId: number): void {
   run("INSERT OR IGNORE INTO ministry_admins (ministry_id, tg_user_id) VALUES (?, ?)", ministryId, userId);
+}
+
+/** Ministries that use this chat for either role. */
+export function ministriesUsingChat(chatId: number): Ministry[] {
+  return all("SELECT * FROM ministries WHERE intercessor_chat_id = ? OR requestor_chat_id = ? ORDER BY id", chatId, chatId)
+    .map(toMinistry);
+}
+
+/** A group upgraded to a supergroup gets a new id. */
+export function migrateChat(fromId: number, toId: number): void {
+  run("UPDATE ministries SET intercessor_chat_id = ? WHERE intercessor_chat_id = ?", toId, fromId);
+  run("UPDATE ministries SET requestor_chat_id = ? WHERE requestor_chat_id = ?", toId, fromId);
+}
+
+export function countOpenRequests(ministryId: number): number {
+  return get("SELECT count(*) AS n FROM requests WHERE ministry_id = ? AND status IN ('pending_review', 'open')", ministryId)!.n;
+}
+
+// ---- admin invites ----
+
+const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function createInvite(ministryId: number, createdBy: number): string {
+  const token = randomBytes(12).toString("base64url");
+  run("INSERT INTO admin_invites (token, ministry_id, created_by, created_at) VALUES (?, ?, ?, ?)", token, ministryId, createdBy, now());
+  return token;
+}
+
+/** Marks the invite used. Returns null if unknown, used, or expired. */
+export function consumeInvite(token: string): { ministryId: number; createdBy: number } | null {
+  const row = get(
+    `UPDATE admin_invites SET used_at = ? WHERE token = ? AND used_at IS NULL AND created_at > ?
+     RETURNING ministry_id, created_by`,
+    now(), token, now() - INVITE_TTL_MS,
+  );
+  return row ? { ministryId: row.ministry_id, createdBy: row.created_by } : null;
 }
 
 // ---- bans ----

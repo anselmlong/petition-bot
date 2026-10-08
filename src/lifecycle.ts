@@ -51,13 +51,26 @@ export function routeAfterModeration(result: ModerationResult): "publish" | "rev
   return result.ok && !result.flagged ? "publish" : "review";
 }
 
-export type StartPayload = { kind: "request"; ministryId: number } | { kind: "reply"; requestId: number };
+export type StartPayload =
+  | { kind: "request"; ministryId: number }
+  | { kind: "reply"; requestId: number }
+  | { kind: "link"; role: "intercessor" | "requestor"; ministryId: number }
+  | { kind: "invite"; token: string };
 
+/** Deep-link payloads: only [A-Za-z0-9_-], max 64 chars (Telegram limit). */
 export function parseStartPayload(payload: string | undefined): StartPayload | null {
-  const m = /^(m|r)_(\d{1,15})$/.exec(payload ?? "");
+  const p = payload ?? "";
+  const invite = /^a_([A-Za-z0-9_-]{8,40})$/.exec(p);
+  if (invite) return { kind: "invite", token: invite[1]! };
+  const m = /^(m|r|si|sr)_(\d{1,15})$/.exec(p);
   if (!m) return null;
   const id = Number(m[2]);
-  return m[1] === "m" ? { kind: "request", ministryId: id } : { kind: "reply", requestId: id };
+  switch (m[1]) {
+    case "m": return { kind: "request", ministryId: id };
+    case "r": return { kind: "reply", requestId: id };
+    case "si": return { kind: "link", role: "intercessor", ministryId: id };
+    default: return { kind: "link", role: "requestor", ministryId: id };
+  }
 }
 
 export function requesterLabel(req: { is_anonymous: boolean; display_name: string | null }): string {

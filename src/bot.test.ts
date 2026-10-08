@@ -19,18 +19,24 @@ let calls: Call[];
 let nextMessageId: number;
 let updateId: number;
 let bot: ReturnType<typeof createBot>;
+/** chat id → Telegram error to return for sendMessage there */
+let failures: Map<number, { error_code: number; description: string; parameters?: object }>;
 
 function setup() {
   db.openDb(":memory:");
   calls = [];
   nextMessageId = 1000;
   updateId = 1;
+  failures = new Map();
   bot = createBot("test", BOT as any);
   bot.api.config.use(async (_prev, method, payload) => {
     calls.push({ method, payload });
+    const failure = method === "sendMessage" ? failures.get((payload as any).chat_id) : undefined;
+    if (failure) return { ok: false, ...failure } as any;
     const result =
       method === "getChatMember" ? { status: (payload as any).user_id === ALICE.id ? "left" : "member", user: {} } :
       method === "sendMessage" ? { message_id: nextMessageId++, chat: { id: (payload as any).chat_id }, date: 0 } :
+      method === "getChat" ? { id: (payload as any).chat_id, type: "supergroup", title: `Chat ${(payload as any).chat_id}` } :
       true;
     return { ok: true, result } as any;
   });
@@ -39,12 +45,12 @@ function setup() {
 const sent = (chatId: number) => calls.filter((c) => c.method === "sendMessage" && c.payload.chat_id === chatId);
 const lastText = (chatId: number) => sent(chatId).at(-1)?.payload.text as string;
 
-async function dm(from: typeof ADMIN, text: string, chatType: "private" | "supergroup" = "private", chatId = from.id) {
+async function dm(from: typeof ADMIN, text: string, chatType: "private" | "group" | "supergroup" = "private", chatId = from.id) {
   const entities = text.startsWith("/") ? [{ type: "bot_command", offset: 0, length: text.split(" ")[0]!.length }] : undefined;
   await bot.handleUpdate({
     update_id: updateId++,
     message: { message_id: updateId, date: 0, from, text, entities,
-      chat: chatType === "private" ? { id: chatId, type: "private", first_name: from.first_name } : { id: chatId, type: "supergroup", title: "G" } },
+      chat: chatType === "private" ? { id: chatId, type: "private", first_name: from.first_name } : { id: chatId, type: chatType, title: "G" } },
   } as Update);
 }
 
@@ -82,7 +88,9 @@ describe("individual intercessor (solo) flow", () => {
   it("clean anonymous request reaches the intercessor without the name, and a prayer reaches the requester", async () => {
     stubModeration({});
     await dm(ADMIN, "/newministry Pastor's Line");
-    expect(lastText(ADMIN.id)).toContain("https://t.me/petition_test_bot?start=m_1");
+    await tap(ADMIN, "w:me:1:1");
+    await tap(ADMIN, "w:rl:1:1");
+    expect(sent(ADMIN.id).some((c) => c.payload.text.includes("https://t.me/petition_test_bot?start=m_1"))).toBe(true);
 
     await submitRequest(1, ALICE, "Please pray for my exams", "y", "1w");
     await vi.waitFor(() => expect(db.listActiveRequestsFor(ALICE.id)[0]?.status).toBe("open"));
@@ -202,3 +210,136 @@ describe("requester controls", () => {
 });
 
 const BOB_NOT_OWNER = { id: 77, is_bot: false, first_name: "Bob" };
+
+// ---------- setup wizard ----------
+
+const CHANNEL = -100700;
+const REQ_GROUP = -100800;
+
+async function memberUpdate(from: typeof ADMIN, chat: { id: number; type: string; title: string }, before: string, after: string) {
+  await bot.handleUpdate({
+    update_id: updateId++,
+    my_chat_member: { chat, from, date: 0,
+      old_chat_member: { status: before, user: BOT }, new_chat_member: { status: after, user: BOT } },
+  } as unknown as Update);
+}
+
+const buttonsOf = (c: Call | undefined) => (c?.payload.reply_markup?.inline_keyboard ?? []).flat() as any[];
+const editsTo = (chatId: number) => calls.filter((c) => c.method.startsWith("editMessage") && c.payload.chat_id === chatId);
+
+describe("setup wizard", () => {
+  it("new users get a welcome with a setup button; admins get their panel", async () => {
+    await dm(ALICE, "/start");
+    expect(buttonsOf(sent(ALICE.id).at(-1)).map((b) => b.callback_data)).toEqual(["wel:need", "wel:setup"]);
+    await dm(ADMIN, "/newministry Line");
+    await dm(ADMIN, "/start");
+    expect(lastText(ADMIN.id)).toContain("⛪ Line");
+    expect(lastText(ADMIN.id)).toContain("Open requests: 0");
+  });
+
+  it("full guided flow: name → intercessor group via add-to-group link → channel via add-to-channel link", async () => {
+    await tap(ADMIN, "wel:setup");
+    expect(lastText(ADMIN.id)).toContain("Step 1 of 3");
+    await dm(ADMIN, "Cell Group Prayer");
+    expect(lastText(ADMIN.id)).toContain("Step 2 of 3");
+    const m = db.listAdminMinistries(ADMIN.id)[0]!;
+    expect(m).toMatchObject({ name: "Cell Group Prayer", intercessor_chat_id: ADMIN.id });
+
+    await tap(ADMIN, `w:ig:${m.id}:1`);
+    const groupLink = buttonsOf(editsTo(ADMIN.id).at(-1)).find((b) => b.url)?.url;
+    expect(groupLink).toBe(`https://t.me/petition_test_bot?startgroup=si_${m.id}`);
+
+    // Telegram adds the bot, then sends "/start@bot si_<id>" in the group as the admin.
+    await memberUpdate(ADMIN, { id: GROUP, type: "supergroup", title: "Intercessors" }, "left", "member");
+    await dm(ADMIN, `/start@petition_test_bot si_${m.id}`, "supergroup", GROUP);
+    expect(db.getMinistry(m.id)?.intercessor_chat_id).toBe(GROUP);
+    expect(sent(GROUP)).toHaveLength(1); // both signals arrived; linked once
+    expect(lastText(GROUP)).toContain("now receives prayer requests");
+    expect(lastText(ADMIN.id)).toContain("Step 3 of 3");
+
+    await tap(ADMIN, `w:rc:${m.id}:1`);
+    expect(buttonsOf(editsTo(ADMIN.id).at(-1)).find((b) => b.url)?.url)
+      .toBe("https://t.me/petition_test_bot?startchannel&admin=post_messages");
+    await memberUpdate(ADMIN, { id: CHANNEL, type: "channel", title: "Parish News" }, "left", "administrator");
+    expect(db.getMinistry(m.id)?.requestor_chat_id).toBe(CHANNEL);
+    expect(buttonsOf(sent(CHANNEL).at(-1))[0].url).toBe(`https://t.me/petition_test_bot?start=m_${m.id}`);
+    expect(sent(ADMIN.id).some((c) => c.payload.text.includes("is ready!"))).toBe(true);
+    expect(db.getState(ADMIN.id)).toBeNull();
+  });
+
+  it("only ministry admins can link a group", async () => {
+    await dm(ADMIN, "/newministry Line");
+    await dm(ALICE, "/start@petition_test_bot si_1", "supergroup", GROUP);
+    expect(db.getMinistry(1)?.intercessor_chat_id).toBe(ADMIN.id);
+    expect(lastText(GROUP)).toContain("Only that ministry's admins");
+  });
+
+  it("refuses to use the same chat for intercessors and requestors", async () => {
+    await dm(ADMIN, "/newministry Line");
+    await dm(ADMIN, "/start@petition_test_bot si_1", "supergroup", GROUP);
+    await dm(ADMIN, "/start@petition_test_bot sr_1", "supergroup", GROUP);
+    expect(db.getMinistry(1)).toMatchObject({ intercessor_chat_id: GROUP, requestor_chat_id: null });
+    expect(lastText(ADMIN.id)).toContain("can't also be where people ask");
+  });
+
+  it("requestor group link posts the request button and restricts who can ask", async () => {
+    await dm(ADMIN, "/newministry Line");
+    await tap(ADMIN, "w:rg:1:0");
+    await dm(ADMIN, "/start@petition_test_bot sr_1", "supergroup", REQ_GROUP);
+    expect(db.getMinistry(1)?.requestor_chat_id).toBe(REQ_GROUP);
+    expect(buttonsOf(sent(REQ_GROUP).at(-1))[0].text).toBe("🙏 Request prayer");
+    expect(lastText(ADMIN.id)).toContain("Pin it");
+  });
+});
+
+describe("self-healing", () => {
+  it("bot removed from the intercessor group → requests go to the admin's DM", async () => {
+    await dm(ADMIN, "/newministry Line");
+    await dm(ADMIN, "/start@petition_test_bot si_1", "supergroup", GROUP);
+    await memberUpdate(ADMIN, { id: GROUP, type: "supergroup", title: "Intercessors" }, "member", "kicked");
+    expect(db.getMinistry(1)?.intercessor_chat_id).toBe(ADMIN.id);
+    expect(lastText(ADMIN.id)).toContain("I was removed from your intercessors' group");
+  });
+
+  it("posting to the group fails → falls back to the admin's DM and still delivers", async () => {
+    stubModeration({});
+    await dm(ADMIN, "/newministry Line");
+    await dm(ADMIN, "/start@petition_test_bot si_1", "supergroup", GROUP);
+    failures.set(GROUP, { error_code: 403, description: "Forbidden: bot was kicked" });
+    const req = await submitRequest(1, ALICE, "Peace", "y", "1d");
+    await vi.waitFor(() => expect(db.getRequest(req.id)?.intercessor_message_id).toBeTruthy());
+    expect(db.getMinistry(1)?.intercessor_chat_id).toBe(ADMIN.id);
+    expect(sent(ADMIN.id).some((c) => c.payload.text.startsWith(`🙏 Prayer request #${req.id}`))).toBe(true);
+    expect(lastText(ALICE.id)).toContain("has been shared");
+  });
+
+  it("group upgraded to supergroup: follows the new id from a send error and the service message", async () => {
+    stubModeration({});
+    const OLD = -500, NEW = -100900;
+    await dm(ADMIN, "/newministry Line");
+    await dm(ADMIN, "/start@petition_test_bot si_1", "group", OLD);
+    failures.set(OLD, { error_code: 400, description: "group upgraded", parameters: { migrate_to_chat_id: NEW } });
+    await submitRequest(1, ALICE, "Peace", "y", "1d");
+    await vi.waitFor(() => expect(sent(NEW)).toHaveLength(1));
+    expect(db.getMinistry(1)?.intercessor_chat_id).toBe(NEW);
+
+    db.setIntercessorChat(1, OLD);
+    await bot.handleUpdate({ update_id: updateId++, message: { message_id: 1, date: 0,
+      chat: { id: OLD, type: "group", title: "G" }, from: ADMIN, migrate_to_chat_id: NEW } } as Update);
+    expect(db.getMinistry(1)?.intercessor_chat_id).toBe(NEW);
+  });
+});
+
+describe("admin invites", () => {
+  it("one-time link makes the opener an admin", async () => {
+    await dm(ADMIN, "/newministry Line");
+    await tap(ADMIN, "mg:1:inv");
+    const token = /start=a_([\w-]+)/.exec(lastText(ADMIN.id))![1];
+    await dm(INTERCESSOR, `/start a_${token}`);
+    expect(db.getMinistry(1)?.admin_user_ids).toEqual([ADMIN.id, INTERCESSOR.id]);
+    expect(lastText(ADMIN.id)).toContain("Ben is now an admin");
+    await dm(ALICE, `/start a_${token}`);
+    expect(lastText(ALICE.id)).toContain("expired or was already used");
+    expect(db.getMinistry(1)?.admin_user_ids).not.toContain(ALICE.id);
+  });
+});

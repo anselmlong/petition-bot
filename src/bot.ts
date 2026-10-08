@@ -1,4 +1,4 @@
-import { Api, Bot, GrammyError, InlineKeyboard, type Context } from "grammy";
+import { Bot, GrammyError, InlineKeyboard, type Api, type Context } from "grammy";
 import type { User, UserFromGetMe } from "grammy/types";
 import * as db from "./db.ts";
 import {
@@ -14,51 +14,21 @@ import {
   routeAfterModeration,
 } from "./lifecycle.ts";
 import { moderate } from "./moderation.ts";
+import { fallBackToAdminDm, registerSetup } from "./setup.ts";
+import { deepLink, fullName, isMemberOf, trySend } from "./tg.ts";
 
 const HELP = `🙏 Petition Bot
 
-For requestors:
-• Open your ministry's "Request prayer" link to submit a request.
-• /myrequests — see, close or delete your requests
-• /cancel — abandon what you're typing
+Asking for prayer:
+• Tap your community's 🙏 Request prayer link or button
+• /myrequests: see, close or delete your requests
+• /cancel: stop what you're typing
 
-For ministry admins:
-• /newministry <name> — create a ministry (you become its intercessor + admin)
-• /link <id> — get the request link to share
-• /linkintercessors <id> — run inside a group to make it the intercessor group
-• /linkrequestors <id> [@channel] — restrict requests to members of a group/channel
-• /addadmin <id> — reply to someone's message in a group to make them an admin
-• /ministries — list ministries you admin`;
+Running a prayer ministry:
+• /setup: guided setup (about a minute)
+• /manage: share link, invite admins, change groups
 
-function fullName(u: User): string {
-  const name = [u.first_name, u.last_name].filter(Boolean).join(" ");
-  return u.username ? `${name} (@${u.username})` : name;
-}
-
-function deepLink(bot: Bot, payload: string): string {
-  return `https://t.me/${bot.botInfo.username}?start=${payload}`;
-}
-
-async function isMemberOf(api: Api, chatId: number, userId: number): Promise<boolean> {
-  if (chatId === userId) return true;
-  if (chatId > 0) return false; // another person's DM
-  try {
-    const m = await api.getChatMember(chatId, userId);
-    return m.status === "creator" || m.status === "administrator" || m.status === "member" ||
-      (m.status === "restricted" && m.is_member);
-  } catch {
-    return false;
-  }
-}
-
-async function trySend(api: Api, chatId: number, text: string, other?: Parameters<Api["sendMessage"]>[2]) {
-  try {
-    return await api.sendMessage(chatId, text, other);
-  } catch (err) {
-    console.error(`sendMessage to ${chatId} failed`, err);
-    return null;
-  }
-}
+Advanced: /newministry <name>, /link <id>, /ministries, /linkintercessors <id>, /linkrequestors <id> [@channel], /addadmin <id> (as a reply)`;
 
 function intercessorKeyboard(bot: Bot, requestId: number) {
   return new InlineKeyboard()
@@ -75,10 +45,21 @@ async function publish(bot: Bot, requestId: number): Promise<void> {
   if (!req) return;
   const ministry = await db.getMinistry(req.ministry_id);
   if (!ministry) return;
-  const msg = await trySend(bot.api, ministry.intercessor_chat_id, formatIntercessorPost(req), {
+  const post = (chatId: number) => trySend(bot.api, chatId, formatIntercessorPost(req), {
     reply_markup: intercessorKeyboard(bot, req.id),
   });
-  if (msg) await db.setIntercessorMessage(req.id, msg.message_id);
+  let msg = await post(ministry.intercessor_chat_id);
+  if (!msg && ministry.intercessor_chat_id < 0) {
+    // Bot was likely removed from the group or lost permission: keep prayer flowing via an admin.
+    const healed = await fallBackToAdminDm(bot.api, ministry, "I couldn't post in your intercessors' group");
+    msg = await post(healed.intercessor_chat_id);
+  }
+  if (!msg) {
+    console.error(`request #${req.id}: could not reach any intercessor chat`);
+    await trySend(bot.api, req.requester_tg_id, `📨 Your prayer request #${req.id} was received. You'll be notified when someone prays.`);
+    return;
+  }
+  await db.setIntercessorMessage(req.id, msg.message_id);
   await trySend(bot.api, req.requester_tg_id, `✅ Your prayer request #${req.id} has been shared with ${ministry.name}. You'll be notified when someone prays.`);
 }
 
@@ -156,6 +137,7 @@ async function recordAndDeliverPrayer(api: Api, req: db.PrayerRequest, from: Use
 export function createBot(token: string, botInfo?: UserFromGetMe): Bot {
   const bot = new Bot(token, { botInfo });
   const isPrivate = (ctx: Context) => ctx.chat?.type === "private";
+  const setup = registerSetup(bot);
 
   async function requireAdmin(ctx: Context, ministryId: number): Promise<db.Ministry | null> {
     const ministry = Number.isSafeInteger(ministryId) ? await db.getMinistry(ministryId) : null;
@@ -169,9 +151,15 @@ export function createBot(token: string, botInfo?: UserFromGetMe): Bot {
   // --- /start and request submission ---
 
   bot.command("start", async (ctx) => {
-    if (!isPrivate(ctx) || !ctx.from) return;
+    if (!ctx.from) return;
     const payload = parseStartPayload(ctx.match);
-    if (!payload) return ctx.reply(HELP);
+    if (!isPrivate(ctx)) {
+      // Sent by Telegram when an admin uses an add-to-group link from the setup wizard.
+      if (payload?.kind === "link") await setup.groupStart(ctx, payload.role, payload.ministryId);
+      return;
+    }
+    if (!payload || payload.kind === "link") return setup.welcome(ctx);
+    if (payload.kind === "invite") return setup.acceptInvite(ctx, payload.token);
 
     if (payload.kind === "request") {
       const ministry = await db.getMinistry(payload.ministryId);
@@ -226,6 +214,7 @@ export function createBot(token: string, botInfo?: UserFromGetMe): Bot {
       return ctx.reply("🙏 Thank you — your message was delivered.");
     }
 
+    if (await setup.onText(ctx, state, text)) return;
     return ctx.reply(HELP);
   });
 
@@ -330,15 +319,10 @@ export function createBot(token: string, botInfo?: UserFromGetMe): Bot {
   // --- ministry admin setup ---
 
   bot.command("newministry", async (ctx) => {
-    if (!isPrivate(ctx) || !ctx.from) return ctx.reply("Run /newministry in a private chat with me.");
+    if (!isPrivate(ctx) || !ctx.from) return ctx.reply("DM me /setup to create a ministry.");
     const name = ctx.match.trim();
-    if (!name) return ctx.reply("Usage: /newministry <name>");
-    const m = await db.createMinistry(name.slice(0, 80), ctx.chat.id, ctx.from.id);
-    await ctx.reply(
-      `Created "${m.name}" (id ${m.id}). Requests will come to this chat.\n\n` +
-      `Share this link in your channel so people can request prayer:\n${deepLink(bot, `m_${m.id}`)}\n\n` +
-      `To use a group of intercessors instead, add me to that group and run /linkintercessors ${m.id} there.`,
-    );
+    if (!name) return ctx.reply("Usage: /newministry <name>, or just use /setup for a guided version.");
+    await setup.onText(ctx, { step: "setup_name" }, name);
   });
 
   bot.command("link", async (ctx) => {

@@ -25,11 +25,14 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 
 await sweep();
 await bot.api.setMyCommands([
+  { command: "start", description: "Get started" },
   { command: "myrequests", description: "See, close or delete your prayer requests" },
+  { command: "setup", description: "Set up prayer for your community" },
+  { command: "manage", description: "Manage your prayer ministry" },
   { command: "cancel", description: "Stop what you're typing" },
   { command: "help", description: "How this bot works" },
 ]);
 await bot.start({
-  allowed_updates: ["message", "callback_query"],
+  allowed_updates: ["message", "callback_query", "my_chat_member"],
   onStart: (me) => console.log(`@${me.username} polling`),
 });

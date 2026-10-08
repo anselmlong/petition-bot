@@ -35,14 +35,30 @@ Requests are always submitted in a **private DM** with the bot, so nobody else i
 
 Each request is screened by [TypeSafe Jev](https://docs.typesafe.ai), which answers yes/no questions with a probability. The bot asks six questions: spam, abusive, sexual, doxxing, not a real request, and someone in danger. Any answer at 50% or more sends the request to the ministry admins, along with which questions triggered. The questions target misuse, not heavy topics, so genuine requests about grief or illness pass. **If the API call fails, or the key isn't set, the request goes to human review rather than straight through.**
 
+## Getting started (admins)
+
+DM the bot **/setup**. A three-step guided flow follows, all done with buttons:
+
+1. **Name** your prayer ministry.
+2. **Who prays?** Choose *Just me* (requests come to your DM) or *A group*. For a group, a button opens Telegram's group picker, the bot joins, and it links itself.
+3. **Where do people ask?** Choose *My channel* (the bot is added as a channel admin that can post), *A group chat*, or *Anywhere* (just a link). The bot posts a 🙏 Request prayer button in the chat you pick.
+
+You finish with a forwardable share card and your link. **/manage** opens a panel to share the link again, invite another admin with a one-time link, or change either chat.
+
+Handled automatically:
+- **The bot is removed from the intercessor group, or can't post there:** requests fall back to an admin's DM, and the admins are told.
+- **The bot is removed from the requestors' chat:** anyone with the link can ask, and the admins are told.
+- **A group is upgraded to a supergroup:** the new chat id is picked up.
+- **The same chat is picked for both roles:** refused, because everyone would see every request.
+- **An admin posts as "anonymous admin":** the bot explains how to fix it.
+
 ## Commands
 
 | Who | Command |
 |---|---|
-| Anyone | `/myrequests`, `/cancel`, `/help` |
-| Admin (DM) | `/newministry <name>`, `/link <id>`, `/ministries` |
-| Admin (in group) | `/linkintercessors <id>`, `/linkrequestors <id>`, reply + `/addadmin <id>` |
-| Admin (DM, channels) | `/linkrequestors <id> @channel` (bot must be a channel admin) |
+| Anyone | `/start`, `/myrequests`, `/cancel`, `/help` |
+| Admin | `/setup`, `/manage` |
+| Advanced | `/newministry <name>`, `/link <id>`, `/ministries`, `/linkintercessors <id>` (in group), `/linkrequestors <id> [@channel]`, `/addadmin <id>` (as a reply) |
 
 ## Setup
 
@@ -51,9 +67,7 @@ Runs as a single long-polling Node process with SQLite. No public URL, webhook o
 1. **Create the bot**: message [@BotFather](https://t.me/BotFather) → `/newbot`, copy the token. Leave group privacy mode **on**, since the bot only needs commands and buttons.
 2. Copy `.env.example` to `.env` and fill it in.
 3. `npm ci --omit=dev && npm start`. This needs Node ≥ 22.18, which runs the TypeScript directly with no build step and has built-in SQLite.
-4. **Create a ministry**: DM the bot `/newministry Pastor Jo's Prayer Line`, and share the link it gives you.
-   - Group of intercessors: add the bot to the group and run `/linkintercessors <id>` there.
-   - Restrict who can submit: `/linkrequestors <id>` in the requestors' group, or `/linkrequestors <id> @channel` in a DM. For channels, the bot must be an admin.
+4. DM the bot `/setup`.
 
 ### Running on a server (systemd)
 
@@ -80,7 +94,9 @@ Layout:
 
 - `src/main.ts`: the entry point. It runs long polling and a 15-minute sweep that closes expired requests. Expiry itself is also enforced at tap time.
 - `src/lifecycle.ts`: pure rules (expiry, routing, formatting).
-- `src/bot.ts`: Telegram handlers.
+- `src/bot.ts`: request, prayer and review handlers.
+- `src/setup.ts`: the setup wizard, the `/manage` panel, automatic chat linking and self-healing.
+- `src/tg.ts`: shared Telegram helpers.
 - `src/db.ts`: the SQLite schema and queries (`node:sqlite`).
 - `src/moderation.ts`: TypeSafe Jev screening.
 
