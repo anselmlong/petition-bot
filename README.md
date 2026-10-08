@@ -33,7 +33,7 @@ Requests are always submitted in a **private DM** with the bot, so nobody else i
 
 ### Moderation
 
-Each request is screened by an LLM (via Vercel AI Gateway, default `anthropic/claude-haiku-5.5`). The screen is tuned to *not* flag heavy-but-genuine topics (grief, illness, abuse, mental health). It flags spam, harassment, explicit content, doxxing, off-topic messages, and imminent-danger cases. Flagged requests go to the ministry admins. **If the AI call fails, the request goes to human review rather than straight through.**
+Each request is screened by [TypeSafe Jev](https://docs.typesafe.ai), which answers yes/no questions with a probability. The bot asks six questions: spam, abusive, sexual, doxxing, not a real request, and someone in danger. Any answer at 50% or more sends the request to the ministry admins, along with which questions triggered. The questions target misuse, not heavy topics, so genuine requests about grief or illness pass. **If the API call fails, or the key isn't set, the request goes to human review rather than straight through.**
 
 ## Commands
 
@@ -46,34 +46,43 @@ Each request is screened by an LLM (via Vercel AI Gateway, default `anthropic/cl
 
 ## Setup
 
+Runs as a single long-polling Node process with SQLite. No public URL, webhook or external database is needed.
+
 1. **Create the bot**: message [@BotFather](https://t.me/BotFather) → `/newbot`, copy the token. Leave group privacy mode **on**, since the bot only needs commands and buttons.
-2. **Provision**: a Postgres database (e.g. Neon via the Vercel Marketplace) and a Vercel project.
-3. **Env vars**: see [`.env.example`](.env.example). Generate secrets with `openssl rand -hex 32`.
-4. **Migrate**: `npm run db:migrate` (reads `.env.local`).
-5. **Deploy** to Vercel, then point Telegram at it:
-   ```sh
-   npm run webhook:set -- https://<your-deployment>.vercel.app
-   ```
-6. **Create a ministry**: DM the bot `/newministry Pastor Jo's Prayer Line`, and share the link it gives you.
+2. Copy `.env.example` to `.env` and fill it in.
+3. `npm ci --omit=dev && npm start`. This needs Node ≥ 22.18, which runs the TypeScript directly with no build step and has built-in SQLite.
+4. **Create a ministry**: DM the bot `/newministry Pastor Jo's Prayer Line`, and share the link it gives you.
    - Group of intercessors: add the bot to the group and run `/linkintercessors <id>` there.
    - Restrict who can submit: `/linkrequestors <id>` in the requestors' group, or `/linkrequestors <id> @channel` in a DM. For channels, the bot must be an admin.
+
+### Running on a server (systemd)
+
+```sh
+git clone https://github.com/anselmlong/petition-bot ~/petition-bot && cd ~/petition-bot
+npm ci --omit=dev && $EDITOR .env
+cp petition-bot.service ~/.config/systemd/user/ && systemctl --user daemon-reload
+systemctl --user enable --now petition-bot
+journalctl --user -u petition-bot -f
+```
+
+The database lives at `data/petition.db`. Back it up, and don't delete it.
 
 ## Development
 
 ```sh
 npm install
-npm test         # lifecycle unit tests
+npm test           # lifecycle, SQLite, moderation, and end-to-end handler tests (fake Telegram API)
 npm run typecheck
+npm run dev        # watch mode
 ```
 
 Layout:
 
-- `api/telegram.ts`: the webhook. It verifies the secret header, acks immediately, then handles the update in `waitUntil`, deduping on `update_id`.
-- `api/cron.ts`: the daily cleanup for expired requests. Expiry itself is enforced at tap time.
-- `src/lifecycle.ts`: pure rules (expiry, routing, formatting), unit-tested.
+- `src/main.ts`: the entry point. It runs long polling and a 15-minute sweep that closes expired requests. Expiry itself is also enforced at tap time.
+- `src/lifecycle.ts`: pure rules (expiry, routing, formatting).
 - `src/bot.ts`: Telegram handlers.
-- `src/db.ts`: queries.
-- `schema.sql`: the database schema.
+- `src/db.ts`: the SQLite schema and queries (`node:sqlite`).
+- `src/moderation.ts`: TypeSafe Jev screening.
 
 ## License
 

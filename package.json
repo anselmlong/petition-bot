@@ -3,18 +3,14 @@
   "version": "1.0.0",
   "description": "Telegram bot for requesting and tracking intercessory prayer",
   "scripts": {
+    "start": "node --env-file-if-exists=.env src/main.ts",
+    "dev": "node --watch --env-file-if-exists=.env src/main.ts",
     "typecheck": "tsc",
-    "test": "vitest run",
-    "db:migrate": "node --env-file=.env.local scripts/migrate.ts",
-    "webhook:set": "node --env-file=.env.local scripts/set-webhook.ts"
+    "test": "vitest run"
   },
   "type": "module",
   "dependencies": {
-    "@neondatabase/serverless": "^1.2.0",
-    "@vercel/functions": "^3.9.11",
-    "ai": "^7.0.133",
-    "grammy": "^1.46.0",
-    "zod": "^4.6.5"
+    "grammy": "^1.46.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.4",
@@ -23,6 +19,6 @@
   },
   "license": "MIT",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.18"
   }
 }

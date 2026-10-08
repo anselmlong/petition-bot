@@ -6,7 +6,7 @@ import {
   parseStartPayload,
   resolveExpiry,
   routeAfterModeration,
-} from "./lifecycle.js";
+} from "./lifecycle.ts";
 
 const now = new Date("2026-10-08T00:00:00Z");
 

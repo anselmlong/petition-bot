@@ -1,6 +1,6 @@
 import { Api, Bot, GrammyError, InlineKeyboard, type Context } from "grammy";
-import type { User } from "grammy/types";
-import * as db from "./db.js";
+import type { User, UserFromGetMe } from "grammy/types";
+import * as db from "./db.ts";
 import {
   closesAfterPrayer,
   EXPIRY_PRESETS,
@@ -12,8 +12,8 @@ import {
   parseStartPayload,
   resolveExpiry,
   routeAfterModeration,
-} from "./lifecycle.js";
-import { moderate } from "./moderation.js";
+} from "./lifecycle.ts";
+import { moderate } from "./moderation.ts";
 
 const HELP = `🙏 Petition Bot
 
@@ -153,8 +153,8 @@ async function recordAndDeliverPrayer(api: Api, req: db.PrayerRequest, from: Use
 
 // ---------- bot ----------
 
-export function createBot(token: string): Bot {
-  const bot = new Bot(token);
+export function createBot(token: string, botInfo?: UserFromGetMe): Bot {
+  const bot = new Bot(token, { botInfo });
   const isPrivate = (ctx: Context) => ctx.chat?.type === "private";
 
   async function requireAdmin(ctx: Context, ministryId: number): Promise<db.Ministry | null> {
@@ -259,7 +259,8 @@ export function createBot(token: string): Bot {
     });
     await ctx.answerCallbackQuery();
     await ctx.editMessageText(`🙏 Request #${req.id} submitted (${EXPIRY_PRESETS[preset].label.toLowerCase()}). Checking it now…`);
-    await submit(bot, req);
+    // Polling handles updates one at a time; don't hold everyone up while moderation runs.
+    void submit(bot, req).catch((err) => console.error(`submit #${req.id} failed`, err));
   });
 
   // --- intercessor actions ---

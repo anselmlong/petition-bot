@@ -1,0 +1,18 @@
+# systemd user unit. Install: cp petition-bot.service ~/.config/systemd/user/ && systemctl --user enable --now petition-bot
+[Unit]
+Description=Petition Bot (intercessory prayer, polling)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/petition-bot
+EnvironmentFile=%h/petition-bot/.env
+Environment=NODE_NO_WARNINGS=1
+ExecStart=%h/.local/bin/node src/main.ts
+Restart=always
+RestartSec=5
+MemoryMax=200M
+
+[Install]
+WantedBy=default.target
