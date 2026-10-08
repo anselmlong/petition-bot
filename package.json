@@ -1,0 +1,28 @@
+{
+  "name": "petition-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for requesting and tracking intercessory prayer",
+  "scripts": {
+    "typecheck": "tsc",
+    "test": "vitest run",
+    "db:migrate": "node --env-file=.env.local scripts/migrate.ts",
+    "webhook:set": "node --env-file=.env.local scripts/set-webhook.ts"
+  },
+  "type": "module",
+  "dependencies": {
+    "@neondatabase/serverless": "^1.2.0",
+    "@vercel/functions": "^3.9.11",
+    "ai": "^7.0.133",
+    "grammy": "^1.46.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  }
+}
